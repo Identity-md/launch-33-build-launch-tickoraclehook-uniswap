@@ -9,6 +9,7 @@ import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {BaseHook} from "./base/BaseHook.sol";
+import {ITickOracleHook} from "./interfaces/ITickOracleHook.sol";
 import {Oracle, MAX_CARDINALITY as ORACLE_MAX_CARDINALITY} from "./libraries/Oracle.sol";
 
 /// @title TickOracleHook
@@ -26,12 +27,16 @@ import {Oracle, MAX_CARDINALITY as ORACLE_MAX_CARDINALITY} from "./libraries/Ora
 ///   the end of the previous block, over the seconds elapsed. Then the post-swap tick is recorded for the
 ///   next write. So a pool gets at most one observation per block, and a swap's own price impact only starts
 ///   counting from the next block, which is what makes the oracle expensive to manipulate within a block.
-contract TickOracleHook is BaseHook {
+contract TickOracleHook is BaseHook, ITickOracleHook {
     using Oracle for Oracle.Observation[ORACLE_MAX_CARDINALITY];
     using StateLibrary for IPoolManager;
 
     /// @notice Bookkeeping for a pool's ring buffer, plus the tick that stood after its latest swap.
-    /// @dev Packs into one storage slot, so afterSwap reads and writes it once.
+    /// @dev Packs into one storage slot, so afterSwap reads and writes it once. For an initialized pool,
+    /// `index < cardinality <= cardinalityNext <= MAX_CARDINALITY` holds between calls: `index` is only ever
+    /// advanced modulo the cardinality it was written under, `cardinality` only ever becomes `cardinalityNext`,
+    /// and `cardinalityNext` only ever grows, and never past the cap. A pool the hook never initialized has all
+    /// four fields zero, and `cardinality == 0` is what the Oracle library reverts on.
     struct ObservationState {
         /// @dev Slot of the newest observation.
         uint16 index;
@@ -39,24 +44,30 @@ contract TickOracleHook is BaseHook {
         uint16 cardinality;
         /// @dev Number of slots the buffer will cycle through once its current cycle wraps.
         uint16 cardinalityNext;
-        /// @dev Tick after the pool's latest swap, or its initial tick before any swap.
+        /// @dev Tick after the pool's latest swap, or its initial tick before any swap. Always equal to the
+        /// pool's current tick in the PoolManager, because only a swap moves that tick and every swap on a
+        /// pool with this hook reaches afterSwap.
         int24 lastTick;
     }
 
-    /// @notice Emitted when a pool's buffer is asked to grow.
+    /// @notice Emitted when a pool's buffer reservation grows. Not emitted when a call leaves it unchanged.
+    /// @param id The pool whose buffer grew.
+    /// @param cardinalityNextOld The number of slots reserved before the call.
+    /// @param cardinalityNextNew The number of slots reserved after the call.
     event IncreaseObservationCardinalityNext(PoolId indexed id, uint16 cardinalityNextOld, uint16 cardinalityNextNew);
 
     /// @notice Thrown by consult when asked for the mean over zero seconds.
     error ZeroWindow();
 
-    /// @notice The largest observation buffer any pool may have.
-    uint16 public constant MAX_CARDINALITY = ORACLE_MAX_CARDINALITY;
+    /// @inheritdoc ITickOracleHook
+    uint16 public constant override MAX_CARDINALITY = ORACLE_MAX_CARDINALITY;
 
-    /// @notice Observation buffer per pool. Only slots below the pool's cardinality are live.
-    mapping(PoolId id => Oracle.Observation[ORACLE_MAX_CARDINALITY]) public observations;
+    /// @inheritdoc ITickOracleHook
+    /// @dev Only slots below the pool's cardinality are live.
+    mapping(PoolId id => Oracle.Observation[ORACLE_MAX_CARDINALITY]) public override observations;
 
-    /// @notice Buffer bookkeeping and latest tick per pool.
-    mapping(PoolId id => ObservationState) public states;
+    /// @inheritdoc ITickOracleHook
+    mapping(PoolId id => ObservationState) public override states;
 
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
 
@@ -120,14 +131,11 @@ contract TickOracleHook is BaseHook {
     // Buffer growth (anyone)
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Reserves room for `cardinalityNext` observations in `key`'s buffer, up to MAX_CARDINALITY.
-    /// @dev A no-op if the buffer already reserves at least that many. The new slots come into use once the
-    /// buffer's current cycle wraps. Reverts if the pool was never initialized with this hook, or if
-    /// `cardinalityNext` exceeds MAX_CARDINALITY.
-    /// @return cardinalityNextOld The number of slots reserved before the call.
-    /// @return cardinalityNextNew The number of slots reserved after the call.
+    /// @inheritdoc ITickOracleHook
+    /// @dev The new slots come into use once the buffer's current cycle wraps; `cardinality` is untouched here.
     function increaseObservationCardinalityNext(PoolKey calldata key, uint16 cardinalityNext)
         external
+        override
         returns (uint16 cardinalityNextOld, uint16 cardinalityNextNew)
     {
         PoolId id = key.toId();
@@ -146,23 +154,18 @@ contract TickOracleHook is BaseHook {
     // Reads
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice The tick cumulative of `key`'s pool as of each of `secondsAgos` seconds ago.
-    /// @dev Zero means now, extrapolated from the newest observation with the current tick. Any other value
-    /// is read exactly when it lands on an observation and interpolated between the two surrounding
-    /// observations otherwise. Reverts with TargetPredatesOldestObservation if it reaches further back than
-    /// the buffer holds, and with OracleCardinalityCannotBeZero if the pool has no observations.
+    /// @inheritdoc ITickOracleHook
     function observe(PoolKey calldata key, uint32[] calldata secondsAgos)
         external
         view
+        override
         returns (int56[] memory tickCumulatives)
     {
         return _observe(key.toId(), secondsAgos);
     }
 
-    /// @notice The arithmetic mean tick of `key`'s pool over the last `window` seconds.
-    /// @dev Reverts with ZeroWindow if `window` is zero, and otherwise as `observe` does. The mean rounds
-    /// toward negative infinity, as Uniswap v3-periphery's OracleLibrary does.
-    function consult(PoolKey calldata key, uint32 window) external view returns (int24 arithmeticMeanTick) {
+    /// @inheritdoc ITickOracleHook
+    function consult(PoolKey calldata key, uint32 window) external view override returns (int24 arithmeticMeanTick) {
         if (window == 0) revert ZeroWindow();
 
         uint32[] memory secondsAgos = new uint32[](2);
