@@ -1,0 +1,9 @@
+# Foundry build output
+out/
+cache/
+
+# Script simulations; real broadcasts are kept as the record of a deployment
+broadcast/**/dry-run/
+
+# Local secrets
+.env

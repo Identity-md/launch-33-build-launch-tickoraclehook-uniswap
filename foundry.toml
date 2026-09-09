@@ -1,0 +1,32 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+
+# Pinned to what Uniswap v4-core is built and audited with. via-IR at this many runs is what
+# keeps PoolManager under the EIP-170 size limit, and tests deploy a real PoolManager.
+solc = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 44444444
+via_ir = true
+
+# No CBOR metadata trailer: the runtime bytecode is then exactly the compiled code, so byte scans
+# for forbidden opcodes cannot trip on a hash that happens to contain 0xf4 or 0xff.
+bytecode_hash = "none"
+cbor_metadata = false
+
+ffi = false
+
+[profile.default.fuzz]
+runs = 256
+
+[lint]
+# Sources are linted; the two deliberate findings there carry inline explanations. Tests truncate
+# timestamps to uint32 and divide before multiplying on purpose, to mirror the oracle they check.
+ignore = ["test/**/*.sol"]
+
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
